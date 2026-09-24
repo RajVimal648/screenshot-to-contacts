@@ -1,0 +1,11 @@
+.env
+__pycache__/
+*.py[cod]
+*.csv
+*.xlsx
+*_processed.txt
+.venv/
+venv/
+hr_shots/
+.env.*
+!.env.example

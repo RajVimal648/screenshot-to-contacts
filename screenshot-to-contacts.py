@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
-Extract HR emails + phone numbers + company + job profile from phone screenshots -> CSV + Excel.
+Extract HR emails + phone numbers + company + job profile + location + work mode
+from phone screenshots -> CSV + Excel.
 One row per company: all emails / phones of the same company are joined with commas.
 
 Examples (OpenRouter):
@@ -34,15 +35,15 @@ from PIL import Image
 EXTS = {".png", ".jpg", ".jpeg", ".webp"}
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
 LEGAL_RE = re.compile(r"\b(pvt|private|ltd|limited|llp|inc|corp|corporation)\b")
-FIELDS = ["company", "profile", "emails", "phones", "hr_name", "source_file"]
+FIELDS = ["company", "profile", "work_mode", "location", "emails", "phones", "hr_name", "source_file"]
 DEFAULT_MODELS = {"anthropic": "claude-haiku-4-5-20251001", "openai": "anthropic/claude-haiku-4.5"}
 LIST_SEP = ", "   # emails and phones
-TEXT_SEP = " | "  # profile, hr_name, source_file
+TEXT_SEP = " | "  # profile, work_mode, location, hr_name, source_file
 
 PROMPT = """This is a phone screenshot (LinkedIn post, Naukri listing, job group chat, WhatsApp image, etc.). It may contain HR / recruiter contact details.
 
 Extract the contact details and return ONLY JSON, no markdown, in this shape:
-{"entries":[{"company":"","profile":"","hr_name":"","emails":[],"phones":[]}]}
+{"entries":[{"company":"","profile":"","location":"","work_mode":"","hr_name":"","emails":[],"phones":[]}]}
 
 Rules:
 - One entry per company / job post. If the image shows several posts, return several entries.
@@ -51,6 +52,8 @@ Rules:
 - phones: every mobile / WhatsApp / contact number visible for that post, written as shown (keep +91 or other country code if present). Never guess digits.
 - company: the hiring company name if shown, else "".
 - profile: the job title / role being hired for (e.g. ".NET Developer"), else "".
+- location: the job / office location (city, area, state) exactly as shown, e.g. "Noida, Uttar Pradesh". If several cities are listed, join them with " / ". If not shown, "".
+- work_mode: how the job is worked - use only "Remote", "Hybrid" or "Onsite". Map "WFH" / "work from home" to "Remote", and "WFO" / "work from office" / "on-site" / "in-office" to "Onsite". If a post allows more than one, join them with " / ". If it is not stated, "". Never guess.
 - hr_name: the recruiter / poster name if shown, else "".
 - If the image has no email and no phone number, return {"entries":[]}."""
 
@@ -136,6 +139,29 @@ def company_key(name: str) -> str:
     return " ".join(n.split())
 
 
+def clean_mode(x) -> list[str]:
+    """Normalizes free text like 'WFH', 'work from office', 'Hybrid/Remote' -> ['Remote', 'Hybrid', 'Onsite']."""
+    if x is None:
+        return []
+    t = (" ".join(map(str, x)) if isinstance(x, (list, tuple)) else str(x)).lower()
+    modes = []
+    if re.search(r"remote|work[\s-]*from[\s-]*home|\bwfh\b", t):
+        modes.append("Remote")
+    if "hybrid" in t:
+        modes.append("Hybrid")
+    if re.search(r"on[\s-]?site|work[\s-]*from[\s-]*office|\bwfo\b|in[\s-]?office", t):
+        modes.append("Onsite")
+    return modes
+
+
+def clean_location(x) -> str:
+    if x is None:
+        return ""
+    if isinstance(x, (list, tuple)):
+        x = " / ".join(map(str, x))
+    return " ".join(str(x).split())
+
+
 def add_unique(lst: list[str], value: str) -> None:
     v = (value or "").strip()
     if v and v.lower() not in {x.lower() for x in lst}:
@@ -149,7 +175,8 @@ class Store:
         self.emails = set()
         self.phones = set()    # phone keys
 
-    def add(self, company, emails, phones, profiles, hr_names, sources) -> int:
+    def add(self, company, emails, phones, profiles, hr_names, sources,
+            locations=(), modes=()) -> int:
         """Merge one entry. Returns number of NEW emails + phones stored."""
         company = (company or "").strip()
         new_emails, new_phones = [], []
@@ -167,7 +194,8 @@ class Store:
                 return 0
             rec_key = key or "nocompany:" + (new_emails[0] if new_emails else phone_key(new_phones[0]))
             rec = {"company": company, "emails": [], "phones": [],
-                   "profiles": [], "hr_names": [], "sources": []}
+                   "profiles": [], "modes": [], "locations": [],
+                   "hr_names": [], "sources": []}
             self.records[rec_key] = rec
         if company and not rec["company"]:
             rec["company"] = company
@@ -178,15 +206,20 @@ class Store:
         for p in new_phones:
             rec["phones"].append(p)
             self.phones.add(phone_key(p))
-        for lst, values in ((rec["profiles"], profiles), (rec["hr_names"], hr_names), (rec["sources"], sources)):
+        for lst, values in ((rec["profiles"], profiles), (rec["modes"], modes),
+                            (rec["locations"], locations), (rec["hr_names"], hr_names),
+                            (rec["sources"], sources)):
             for v in values:
                 add_unique(lst, v)
         return len(new_emails) + len(new_phones)
 
     def rows(self):
+        # order must match FIELDS
         for r in self.records.values():
-            yield [r["company"], TEXT_SEP.join(r["profiles"]), LIST_SEP.join(r["emails"]),
-                   LIST_SEP.join(r["phones"]), TEXT_SEP.join(r["hr_names"]), TEXT_SEP.join(r["sources"])]
+            yield [r["company"], TEXT_SEP.join(r["profiles"]), TEXT_SEP.join(r["modes"]),
+                   TEXT_SEP.join(r["locations"]), LIST_SEP.join(r["emails"]),
+                   LIST_SEP.join(r["phones"]), TEXT_SEP.join(r["hr_names"]),
+                   TEXT_SEP.join(r["sources"])]
 
 
 def split_text(v: str) -> list[str]:
@@ -206,6 +239,8 @@ def load_store(csv_path: Path) -> Store:
                     split_text(r.get("profile")),
                     split_text(r.get("hr_name")),
                     split_text(r.get("source_file")),
+                    split_text(r.get("location")),
+                    split_text(r.get("work_mode")),
                 )
     return store
 
@@ -226,7 +261,7 @@ def write_excel(store: Store, path: Path) -> None:
         ws.append(row)  # plain strings, so phone numbers stay text
     for c in ws[1]:
         c.font = Font(bold=True)
-    for col, width in zip("ABCDEF", (28, 30, 50, 28, 24, 30)):
+    for col, width in zip("ABCDEFGH", (28, 30, 16, 28, 50, 28, 24, 30)):
         ws.column_dimensions[col].width = width
     for row in ws.iter_rows(min_row=2):
         for c in row:
@@ -314,6 +349,8 @@ def main(argv=None, chat_factory=make_chat) -> None:
                     as_list(e.get("emails") or e.get("email")),
                     as_list(e.get("phones") or e.get("phone")),
                     [e.get("profile") or ""], [e.get("hr_name") or ""], [img.name],
+                    [clean_location(e.get("location"))],
+                    clean_mode(e.get("work_mode")),
                 )
             try:
                 write_csv(store, csv_path)

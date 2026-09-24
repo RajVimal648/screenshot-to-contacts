@@ -7,7 +7,6 @@ Examples (OpenRouter):
     python screenshot-to-contacts.py --provider openai --model anthropic/claude-haiku-4.5 --test
     python screenshot-to-contacts.py --provider openai --model anthropic/claude-haiku-4.5 --input hr_shots --limit 3
     python screenshot-to-contacts.py --provider openai --model anthropic/claude-haiku-4.5 --input hr_shots
-
 .env for provider "openai" (OpenRouter):
     OPENAI_BASE_URL=https://openrouter.ai/api/v1
     OPENAI_API_KEY=your-openrouter-key
